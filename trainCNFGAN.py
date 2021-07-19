@@ -1,3 +1,5 @@
+#import logging ??
+
 import argparse
 import os, sys
 import warnings
@@ -12,6 +14,8 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as distributed
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
+from torch.autograd import Variable
 
 import torchvision.datasets as dset
 import torchvision.transforms as tforms
@@ -30,6 +34,10 @@ from train_misc import append_regularization_keys_header, append_regularization_
 import dist_utils
 from dist_utils import env_world_size, env_rank
 from torch.utils.data.distributed import DistributedSampler
+
+from lib.networks import Generator, Discriminator
+from lib.utils2 import get_data_loader, generate_images, save_gif
+
 
 SOLVERS = ["dopri5", "bdf", "rk4", "midpoint", 'adams', 'explicit_adams', 'adaptive_heun', 'bosh3']
 
@@ -110,6 +118,22 @@ def get_parser():
     parser.add_argument('--local_rank', default=0, type=int,
                         help='Used for multi-process training. Can either be manually set ' +
                         'or automatically set by using \'python -m multiproc\'.')
+    
+    ## GAN Variables
+    #parser.add_argument('--num-epochs', type=int, default=100)
+    parser.add_argument('--ndf', type=int, default=32, help='Number of features to be used in Discriminator network')
+    #parser.add_argument('--ngf', type=int, default=32, help='Number of features to be used in Generator network')
+    parser.add_argument('--nz', type=int, default=100, help='Size of the noise')
+    parser.add_argument('--d-lr', type=float, default=0.0002, help='Learning rate for the discriminator')
+    parser.add_argument('--g-lr', type=float, default=0.0002, help='Learning rate for the generator')
+    parser.add_argument('--nc', type=int, default=1, help='Number of input channels. Ex: for grayscale images: 1 and RGB images: 3 ')
+    #parser.add_argument('--batch-size', type=int, default=128, help='Batch size')
+    #parser.add_argument('--num-test-samples', type=int, default=16, help='Number of samples to visualize')
+    #parser.add_argument('--output-path', type=str, default='./results/', help='Path to save the images')
+    parser.add_argument('--fps', type=int, default=5, help='frames-per-second value for the gif')
+    parser.add_argument('--use-fixed', action='store_true', help='Boolean to use fixed noise or not')
+
+
 
     #parser.add_argument('--skip-auto-shutdown', action='store_true',
     #                    help='Shutdown instance at the end of training or failure')
@@ -408,23 +432,84 @@ def main():
         if write_log: logger.info('Syncing machines before training')
         dist_utils.sum_tensor(torch.tensor([1.0]).float().cuda())
     
+    ##------------Pre-Train Discriminator Configuration--------------------
+    netD = Discriminator(args.nc, args.ndf).to(device)
+    criterion = nn.BCELoss()
+
+    optimizerD = optim.Adam(netD.parameters(), lr=args.d_lr)
+    real_label = 1
+    fake_label = 0
+    num_batches = len(train_loader) ##lg
+    #fixed_noise = torch.randn(opt.num_test_samples, 100, 1, 1, device=device) - noise added later
+    ##---------------------------------------------------------------------
 
     for epoch in range(begin_epoch, args.num_epochs + 1):
         if not args.validate:
             model.train()  # inheritated method from torch nn, activates 'train mode'
 
+            ##--
+            netD.train()
+            ##--##
+
             with open(trainlog,'a') as f:
-                if write_log: csvlogger = csv.DictWriter(f, traincolumns)
+                if write_log: csvlogger = csv.DictWriter(f, traincolumns) ##lg
 
                 for _, (x, y) in enumerate(train_loader):
                     start = time.time()
                     update_lr(optimizer, itr)
-                    optimizer.zero_grad()
 
                     # cast data and move to device
                     x = add_noise(cvt(x), nbits=args.nbits)
                     #x = x.clamp_(min=0, max=1 )
+
+                    ##---Training discriminator---------------------------
+                    bs = x.shape()
+                    netD.zero_grad()
+                    ##** Do I need optimizer zero grad?
+                    optimizerD.zero_grad()
+                    #real_images = real_images.to(device)
+                    label = torch.full((bs,), real_label, device=device)
+
+                    output = netD(x)
+                    lossD_real = criterion(output, label)
+                    lossD_real.backward()
+                    D_x = output.mean().item() ##lg
+
+                    noise = cvt(torch.randn(bs, args.nz, 1, 1, device=device))
+                    #fixed_z = cvt(torch.randn(min(args.test_batch_size,100), *data_shape))
+                    #fake_images = netG(noise)
+                    fake_images, _, _ = model(noise, reverse=True)
                     
+                    label.fill_(fake_label)
+                    output = netD(fake_images.detach())
+                    lossD_fake = criterion(output, label)
+                    lossD_fake.backward()
+                    D_G_z1 = output.mean().item() ## D(G(z))
+                    lossD = lossD_real + lossD_fake
+                    optimizerD.step()
+                    ##----------------------------------------------------
+
+                    ##---Printing (GAN Stuff)
+                    if (i+1)%100 == 0:
+                        print('Epoch [{}/{}], step [{}/{}], d_loss: {:.4f}, g_loss: {:.4f}, D(x): {:.2f}, Discriminator - D(G(x)): {:.2f}, Generator - D(G(x)): {:.2f}'.format(epoch+1, args.num_epochs, 
+                                                            i+1, num_batches, lossD.item(), lossG.item(), D_x, D_G_z1, D_G_z2))
+                    ##----------------------------------------------------
+
+                    ##---Training Generator/CNF Adversarially------------
+                    model.zero_grad()
+                    optimizer.zero_grad()
+
+                    label.fill_(real_label)
+                    output = netD(fake_images) ##** Do I need to compute this again? Can I use from before??
+                    lossG = criterion(output, label)
+                    lossG.backward()
+                    D_G_z2 = output.mean().item()
+                    optimizer.step()
+
+                    ##---------------------------------------------------
+
+                    model.zero_grad()
+                    optimizer.zero_grad()
                     # compute loss
                     bpd, (x, z), reg_states = compute_bits_per_dim(x, model)
                     if np.isnan(bpd.data.item()):
