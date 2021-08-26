@@ -86,6 +86,8 @@ def get_parser():
     parser.add_argument('--zero_last', type=eval, default=True, choices=[True, False])
     parser.add_argument('--seed', type=int, default=42)
 
+    parser.add_argument('--jacfree_experiment', type=bool, default=False)
+
     # Regularizations
     parser.add_argument('--kinetic-energy', type=float, default=None, help="int_t ||f||_2^2")
     parser.add_argument('--jacobian-norm2', type=float, default=None, help="int_t ||df/dx||_F^2")
@@ -336,7 +338,8 @@ def main():
 
     # build model
     regularization_fns, regularization_coeffs = create_regularization_fns(args)
-    model = create_model(args, data_shape, regularization_fns).cuda() ##** what does the .cuda() do?
+    if not args.jacfree: model = create_model(args, data_shape, regularization_fns).cuda() ##** what does the .cuda() do?
+    else: model = create_model(args, data_shape, None).cuda() 
     if args.distributed: model = dist_utils.DDP(model,
                                                 device_ids=[args.local_rank], 
                                                 output_device=args.local_rank)
@@ -377,6 +380,17 @@ def main():
                     if torch.is_tensor(v):
                         state[k] = cvt(v)
 
+
+    if args.jacfree_experiment:
+        fixed_z = cvt(torch.randn(min(args.test_batch_size,100), *data_shape))
+        with torch.no_grad():
+            fig_filename = os.path.join(args.save, "jacfree_figs.jpg")
+            utils.makedirs(os.path.dirname(fig_filename))
+            generated_samples, _, _ = model(fixed_z, reverse=True,jacfree=True)
+            generated_samples = generated_samples.view(-1, *data_shape)
+            nb = int(np.ceil(np.sqrt(float(fixed_z.size(0)))))
+            save_image(unshift(generated_samples, nbits=args.nbits), fig_filename, nrow=nb)
+        return
 
     # For visualization.
     if write_log: fixed_z = cvt(torch.randn(min(args.test_batch_size,100), *data_shape))

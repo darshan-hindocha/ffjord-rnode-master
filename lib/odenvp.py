@@ -106,9 +106,9 @@ class ODENVP(nn.Module):
                 output_sizes.append((n, c, h, w))
         return tuple(output_sizes)
 
-    def forward(self, x, logpx=None, reg_states=tuple(), reverse=False):
+    def forward(self, x, logpx=None, reg_states=tuple(), reverse=False,jacfree=False):
         if reverse:
-            out = self._generate(x, logpx, reg_states)
+            out = self._generate(x, logpx, reg_states,jacfree=jacfree)
             if self.squeeze_first:
                 x = unsqueeze(out[0])
             else:
@@ -135,7 +135,7 @@ class ODENVP(nn.Module):
         out = torch.cat(out, 1)
         return out, _logpx, reg_states
 
-    def _generate(self, z, logpz=None, reg_states=tuple()):
+    def _generate(self, z, logpz=None, reg_states=tuple(),jacfree=False):
         z = z.view(z.shape[0], -1)
         zs = []
         i = 0
@@ -145,10 +145,10 @@ class ODENVP(nn.Module):
             i += s
         zs = [_z.view(_z.size()[0], *zsize) for _z, zsize in zip(zs, self.dims)]
         _logpz = torch.zeros(zs[0].shape[0], 1).to(zs[0]) if logpz is None else logpz
-        z_prev, _logpz, _ = self.transforms[-1](zs[-1], _logpz, reverse=True)
+        z_prev, _logpz, _ = self.transforms[-1](zs[-1], _logpz, reverse=True,jacfree=jacfree)
         for idx in range(len(self.transforms) - 2, -1, -1):
             z_prev = torch.cat((z_prev, zs[idx]), dim=1)
-            z_prev, _logpz, reg_states = self.transforms[idx](z_prev, _logpz, reg_states, reverse=True)
+            z_prev, _logpz, reg_states = self.transforms[idx](z_prev, _logpz, reg_states, reverse=True,jacfree=jacfree)
         return z_prev, _logpz, reg_states
 
 

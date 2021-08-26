@@ -9,7 +9,7 @@ class SequentialFlow(nn.Module):
         super(SequentialFlow, self).__init__()
         self.chain = nn.ModuleList(layersList)
 
-    def forward(self, x, logpx=None, reg_states=tuple(), reverse=False, inds=None):
+    def forward(self, x, logpx=None, reg_states=tuple(), reverse=False, inds=None,jacfree=False):
         if inds is None:
             if reverse:
                 inds = range(len(self.chain) - 1, -1, -1)
@@ -17,5 +17,9 @@ class SequentialFlow(nn.Module):
                 inds = range(len(self.chain))
 
         for i in inds:
-            x, logpx, reg_states = self.chain[i](x, logpx, reg_states, reverse=reverse)
+            if jacfree and self.chain[i].cnflayer==True:
+                self.chain[i].jacfree=True
+                x, logpx, reg_states = self.chain[i](x, logpx, reg_states, reverse=reverse)
+            else: 
+                x, logpx, reg_states = self.chain[i](x, logpx, reg_states, reverse=reverse)
         return x, logpx, reg_states
