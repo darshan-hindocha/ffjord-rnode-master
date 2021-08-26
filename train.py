@@ -338,7 +338,7 @@ def main():
 
     # build model
     regularization_fns, regularization_coeffs = create_regularization_fns(args)
-    if not args.jacfree: model = create_model(args, data_shape, regularization_fns).cuda() ##** what does the .cuda() do?
+    if not args.jacfree_experiment: model = create_model(args, data_shape, regularization_fns).cuda() ##** what does the .cuda() do?
     else: model = create_model(args, data_shape, None).cuda() 
     if args.distributed: model = dist_utils.DDP(model,
                                                 device_ids=[args.local_rank], 
